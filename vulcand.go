@@ -44,6 +44,6 @@ func (s *Server) put(client *etcd.Client, vulcanpath, servicename, instancename 
 		return err
 	}
 
-	_, err = client.Set(key, fmt.Sprintf("%s", se), 0)
+	_, err = client.Set(key, fmt.Sprintf("%s", se), 60)
 	return err
 }

@@ -1,4 +1,4 @@
-package main // import "github.com/christian-blades-cb/lewisandclark"
+package main // import "github.com/christian-blades-cb/desoto"
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/jessevdk/go-flags"
+	"net/http"
+	_ "net/http/pprof"
 	"strings"
 	"time"
 )
@@ -13,20 +15,19 @@ import (
 var opts struct {
 	Verbose func() `short:"v" description:"so many logs"`
 
-	EtcdHosts             []string `short:"e" long:"etcd-hosts" description:"etcd host(s)" default:"localhost:4001"`
+	EtcdHosts             []string `short:"e" long:"etcd-hosts" description:"etcd host(s)" default:"http://localhost:4001"`
 	VulcandEtcdBase       string   `long:"vulcand-basepath" description:"base path in etcd for vulcand entries" default:"/vulcand"`
 	ServiceDefinitionBase string   `long:"servicedef-basepath" description:"base path in etcd for service definitions" default:"/publication"`
 
 	DockerPath string `short:"d" long:"docker-path" description:"docker path" default:"unix:///var/run/docker.sock"`
 
-	Host string `short:"h" long:"hostname" description:"external hostname, used for registering application to vulcand" default:"localhost"`
+	Host string `short:"h" long:"hostname" description:"external hostname, used for registering application to vulcand (in order to be useful, this hostname must be routable from vulcand)" default:"localhost"`
 }
 
 func init() {
 	opts.Verbose = func() {
 		log.SetLevel(log.DebugLevel)
 	}
-
 }
 
 func main() {
@@ -34,40 +35,43 @@ func main() {
 		log.Fatal("could not parse command line arguments")
 	}
 
+	go func() {
+		log.Info(http.ListenAndServe("0.0.0.0:6060", nil))
+	}()
+
+	log.WithField("hosts", opts.EtcdHosts).Info("connecting to etcd")
 	etcdClient := etcd.NewClient(opts.EtcdHosts)
 	etcdClient.CreateDir(opts.ServiceDefinitionBase, 0)
 
+	log.WithField("host", opts.DockerPath).Info("connecting to docker")
 	dockerClient := mustGetDockerClient(opts.DockerPath)
 	_ = dockerClient
 
 	log.Info("setting up backends")
 	svcs := mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
 	initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
+	log.Info("initial pass")
+	updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
 
-	// start timer
 	ticker := time.NewTicker(30 * time.Second)
 
-	// start service definition watch
 	defChange := make(chan bool)
 	mustWatchServiceDefs(etcdClient, &opts.ServiceDefinitionBase, defChange)
 
-	// switch loop, update poll and update vulcand on either trigger
+	log.Info("beginning watch")
 	// NOTE: never deletes backends, so orphans will need to be removed manually
 	for {
 		select {
 		case <-defChange:
+			log.Info("detected change to service definitions")
 			svcs = mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
 			initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
 			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
 		case <-ticker.C:
+			log.Debug("tick")
 			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
 		}
 	}
-
-	// watch docker for events
-	// load service definitions
-	// match def to container
-	// update specific backend in vulcand
 }
 
 func mustGetDockerClient(path string) *docker.Client {
@@ -82,10 +86,6 @@ func mustGetDockerClient(path string) *docker.Client {
 	return client
 }
 
-// list running containers
-// list service definitions
-// match and map container name to service definition (deal with instance name)
-// create/update vulcand backends
 func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulcanPath *string, svcs services) {
 	containers, err := dclient.ListContainers(docker.ListContainersOptions{})
 	if err != nil {
@@ -115,6 +115,7 @@ func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *d
 			"container_name": instanceName,
 			"container_port": svc.serviceDef.ContainerPort,
 		}).Warn("could not find exposed port")
+		return
 	}
 
 	server := newServer(opts.Host, port)
