@@ -40,12 +40,28 @@ func main() {
 	dockerClient := mustGetDockerClient(opts.DockerPath)
 	_ = dockerClient
 
+	log.Info("setting up backends")
+	svcs := mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
+	initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
+
 	// start timer
-	// start service definition watch
-	// switch loop, update poll and update vulcand on either trigger
 	ticker := time.NewTicker(30 * time.Second)
-	for _ = range ticker.C {
-		updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, &opts.ServiceDefinitionBase)
+
+	// start service definition watch
+	defChange := make(chan bool)
+	mustWatchServiceDefs(etcdClient, &opts.ServiceDefinitionBase, defChange)
+
+	// switch loop, update poll and update vulcand on either trigger
+	// NOTE: never deletes backends, so orphans will need to be removed manually
+	for {
+		select {
+		case <-defChange:
+			svcs = mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
+			initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
+			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
+		case <-ticker.C:
+			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
+		}
 	}
 
 	// watch docker for events
@@ -70,21 +86,18 @@ func mustGetDockerClient(path string) *docker.Client {
 // list service definitions
 // match and map container name to service definition (deal with instance name)
 // create/update vulcand backends
-func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulcanPath, servicePath *string) {
+func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulcanPath *string, svcs services) {
 	containers, err := dclient.ListContainers(docker.ListContainersOptions{})
 	if err != nil {
 		log.WithField("error", err).Fatal("unable to list running docker containers")
 	}
-
-	svcs := mustGetServices(eclient, servicePath)
-	setupVulcandBackends(eclient, *vulcanPath, svcs)
 
 	for _, c := range containers {
 		for _, name := range c.Names {
 			cleanName := strings.TrimLeft(name, "/")
 			for _, s := range svcs {
 				if s.re.MatchString(cleanName) {
-					registerContainerWithVulcan(eclient, s, &c, cleanName)
+					registerContainerWithVulcan(eclient, s, &c, vulcanPath, cleanName)
 				}
 			}
 		}
@@ -92,7 +105,7 @@ func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulca
 
 }
 
-func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *docker.APIContainers, instanceName string) {
+func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *docker.APIContainers, vulcanPath *string, instanceName string) {
 	port, err := findExternalPort(container, svc.serviceDef.ContainerPort)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -105,7 +118,7 @@ func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *d
 	}
 
 	server := newServer(opts.Host, port)
-	if err = server.put(client, opts.VulcandEtcdBase, svc.key, instanceName); err != nil {
+	if err = server.put(client, *vulcanPath, svc.key, instanceName); err != nil {
 		log.WithFields(log.Fields{
 			"error":          err,
 			"service":        svc.key,
@@ -114,6 +127,8 @@ func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *d
 		}).Warn("could not add container to server registry")
 	}
 }
+
+var PortNotExposedError = errors.New("container does not expose the specified port")
 
 func findExternalPort(container *docker.APIContainers, containerPort int64) (int64, error) {
 	for _, aPort := range container.Ports {
@@ -124,9 +139,7 @@ func findExternalPort(container *docker.APIContainers, containerPort int64) (int
 	return -1, PortNotExposedError
 }
 
-var PortNotExposedError = errors.New("container does not expose the specified port")
-
-func setupVulcandBackends(client *etcd.Client, basepath string, svcs services) {
+func initializeVulcandBackends(client *etcd.Client, basepath string, svcs services) {
 	for _, s := range svcs {
 		backend := Backend{Type: "http"}
 		if err := backend.put(client, basepath, s.key); err != nil {
@@ -138,8 +151,25 @@ func setupVulcandBackends(client *etcd.Client, basepath string, svcs services) {
 	}
 }
 
-func watchServiceDefs(client *etcd.Client, basepath *string) {
+// non-blocking
+func mustWatchServiceDefs(client *etcd.Client, basepath *string, changed chan<- bool) {
+	receiver := make(chan *etcd.Response)
+	go func() {
+		for {
+			<-receiver
+			changed <- true
+		}
+	}()
 
+	go func() {
+		_, err := client.Watch(*basepath, 0, true, receiver, nil)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error":       err,
+				"servicepath": basepath,
+			}).Fatal("could not start watch on service definitions")
+		}
+	}()
 }
 
 func mustGetServices(client *etcd.Client, basepath *string) services {
