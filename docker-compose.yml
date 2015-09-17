@@ -1,0 +1,21 @@
+desoto:
+  image: christianbladescb/desoto
+  volumes:
+    - "/var/run/docker.sock:/var/run/docker.sock"
+  environment:
+    - ETCD_HOSTS=http://etcd:4001
+    - HOST=172.17.42.1
+  links:
+    - etcd
+etcd: 
+  image: quay.io/coreos/etcd
+  environment:
+    - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:4001
+    - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:4001
+  expose:
+    - "4001:4001"
+foo:
+  image: alpine:3.2
+  expose:
+    - "400:8000"
+  command: sh -c 'sleep 10000000'
