@@ -13,15 +13,15 @@ import (
 )
 
 var opts struct {
-	Verbose func() `short:"v" description:"so many logs"`
+	Verbose func() `short:"v" long:"verbose" description:"so many logs"`
 
-	EtcdHosts             []string `short:"e" long:"etcd-hosts" description:"etcd host(s)" default:"http://localhost:4001"`
-	VulcandEtcdBase       string   `long:"vulcand-basepath" description:"base path in etcd for vulcand entries" default:"/vulcand"`
-	ServiceDefinitionBase string   `long:"servicedef-basepath" description:"base path in etcd for service definitions" default:"/publication"`
+	EtcdHosts             []string `short:"e" long:"etcd-host" env:"ETCD_HOSTS" description:"etcd host(s)" default:"http://localhost:4001"`
+	VulcandEtcdBase       string   `long:"vulcand-basepath" env:"VULCAND_PATH" description:"base path in etcd for vulcand entries" default:"/vulcand"`
+	ServiceDefinitionBase string   `long:"servicedef-basepath" env:"SERVICEDEF_PATH" description:"base path in etcd for service definitions" default:"/publication"`
 
-	DockerPath string `short:"d" long:"docker-path" description:"docker path" default:"unix:///var/run/docker.sock"`
+	DockerPath string `short:"d" long:"docker-host" env:"DOCKER_HOST" description:"docker path" default:"unix:///var/run/docker.sock"`
 
-	Host string `short:"h" long:"hostname" description:"external hostname, used for registering application to vulcand (in order to be useful, this hostname must be routable from vulcand)" default:"localhost"`
+	Host string `short:"h" long:"hostname" env:"HOST" description:"external hostname, used for registering application to vulcand (in order to be useful, this hostname must be routable from vulcand)" default:"localhost"`
 }
 
 func init() {
@@ -49,6 +49,7 @@ func main() {
 
 	log.Info("setting up backends")
 	svcs := mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
+	log.WithField("count", len(svcs)).Debug("found service definitions")
 	initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
 	log.Info("initial pass")
 	updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
@@ -65,6 +66,7 @@ func main() {
 		case <-defChange:
 			log.Info("detected change to service definitions")
 			svcs = mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
+			log.WithField("count", len(svcs)).Debug("found service definitions")
 			initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
 			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
 		case <-ticker.C:
@@ -97,6 +99,7 @@ func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulca
 			cleanName := strings.TrimLeft(name, "/")
 			for _, s := range svcs {
 				if s.re.MatchString(cleanName) {
+					log.WithField("container_name", cleanName).Debug("registering container as server")
 					registerContainerWithVulcan(eclient, s, &c, vulcanPath, cleanName)
 				}
 			}
@@ -129,11 +132,16 @@ func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *d
 	}
 }
 
-var PortNotExposedError = errors.New("container does not expose the specified port")
+var PortNotExposedError = errors.New("container does not publicly expose the specified port")
 
 func findExternalPort(container *docker.APIContainers, containerPort int64) (int64, error) {
 	for _, aPort := range container.Ports {
 		if containerPort == aPort.PrivatePort {
+			// 0 is a "valid" port, but aPort.PublicPort == 0 if the port is not exposed on the host ¯\_(ツ)_/¯
+			if aPort.PublicPort < 1 || aPort.PublicPort > 65535 {
+				return -1, PortNotExposedError
+			}
+
 			return aPort.PublicPort, nil
 		}
 	}

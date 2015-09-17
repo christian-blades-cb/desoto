@@ -5,6 +5,7 @@ import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"regexp"
+	"strings"
 )
 
 //go:generate ffjson $GOFILE
@@ -21,9 +22,22 @@ type Service struct {
 	key        string
 }
 
+func leafFromKey(key string) string {
+	lastSlash := strings.LastIndex(key, "/")
+	if lastSlash+1 >= len(key) { // also includes empty strings
+		log.WithField("key", key).Fatal("specified key is not a leaf node")
+	}
+
+	if lastSlash == -1 {
+		return key
+	}
+
+	return key[lastSlash+1:]
+}
+
 func newService(key string, b []byte) (*Service, error) {
 	var serviceDef ServiceDefinition
-	err := json.Unmarshal(b, serviceDef)
+	err := json.Unmarshal(b, &serviceDef)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error": err,
@@ -31,21 +45,23 @@ func newService(key string, b []byte) (*Service, error) {
 		}).Warn("unable to unmarshal service definition")
 	}
 
+	cleanKey := leafFromKey(key)
+
 	if serviceDef.NamePattern == nil {
-		defaultPattern := fmt.Sprintf(`^%s-app-\S+`, key)
+		defaultPattern := fmt.Sprintf(`^%s-app-\S+`, cleanKey)
 		serviceDef.NamePattern = &defaultPattern
 	}
 
 	svc := Service{
 		serviceDef: serviceDef,
-		key:        key,
+		key:        cleanKey,
 	}
 
 	compiledRegexp, err := regexp.Compile(*serviceDef.NamePattern)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error":   err,
-			"key":     key,
+			"key":     cleanKey,
 			"pattern": fmt.Sprint(b),
 		}).Warn("unable to compile regexp expression")
 		return &svc, err
