@@ -1,0 +1,31 @@
+[Unit]
+Description=DeSoto Service Discovery for VulcanD
+Requires=docker.service
+After=docker.service
+Requires=etcd.service
+
+[Service]
+Restart=always
+TimeoutStartSec=10 min
+User=core
+KillMode=none
+
+EnvironmentFile=/etc/environment
+
+ExecStartPre=/usr/bin/env bash -c "etcdctl get /environments/%p > '/tmp/%p.env'"
+
+ExecStartPre=-/usr/bin/env docker stop "%p"
+ExecStartPre=-/usr/bin/env docker rm "%p"
+ExecStartPre=/usr/bin/env docker pull christianbladescb/desoto
+
+ExecStart=/usr/bin/env docker run \
+  --name='%p' \
+  --env-file="/tmp/%p.env" \
+  -e HOST=${COREOS_PRIVATE_IPV4} \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  christianbladescb/desoto
+
+ExecStop=-/usr/bin/env docker stop "%p"
+
+[X-Fleet]
+Global=true
