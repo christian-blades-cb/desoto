@@ -207,6 +207,7 @@ func mustWatchServiceDefs(ctx context.Context, client etcd.KeysAPI, basepath *st
 			default:
 				if err.Error() == "unexpected end of JSON input" {
 					log.WithField("error", err).Warn("probably a connection timeout. are we in etcd 0.4.x?")
+					return nil
 				} else {
 					return err
 				}
