@@ -4,9 +4,11 @@ import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
 	"github.com/cenkalti/backoff"
-	"github.com/coreos/go-etcd/etcd"
+	etcd "github.com/coreos/etcd/client"
+	//	"github.com/coreos/go-etcd/etcd"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/jessevdk/go-flags"
+	"golang.org/x/net/context"
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
@@ -31,6 +33,8 @@ func init() {
 	}
 }
 
+const DefaultTimeout = 5 * time.Second
+
 func main() {
 	if _, err := flags.Parse(&opts); err != nil {
 		log.Fatal("could not parse command line arguments")
@@ -40,25 +44,34 @@ func main() {
 		log.Info(http.ListenAndServe("0.0.0.0:6060", nil))
 	}()
 
+	mainContext, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
+
 	log.WithField("hosts", opts.EtcdHosts).Info("connecting to etcd")
-	etcdClient := etcd.NewClient(opts.EtcdHosts)
-	etcdClient.CreateDir(opts.ServiceDefinitionBase, 0)
+	etcdCfg := etcd.Config{Endpoints: opts.EtcdHosts}
+
+	eClient, err := etcd.New(etcdCfg)
+	if err != nil {
+		log.WithField("error", err).Fatal("unable to connect to etcd cluster")
+	}
+	kApi := etcd.NewKeysAPI(eClient)
+	mustCreateServiceDirectory(mainContext, kApi, opts.ServiceDefinitionBase)
 
 	log.WithField("host", opts.DockerPath).Info("connecting to docker")
 	dockerClient := mustGetDockerClient(opts.DockerPath)
 	_ = dockerClient
 
 	log.Info("setting up backends")
-	svcs := mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
+	svcs := mustGetServices(mainContext, kApi, &opts.ServiceDefinitionBase)
 	log.WithField("count", len(svcs)).Debug("found service definitions")
-	initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
+	initializeVulcandBackends(mainContext, kApi, opts.VulcandEtcdBase, svcs)
 	log.Info("initial pass")
-	updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
+	updateVulcanDFromDocker(mainContext, dockerClient, kApi, &opts.VulcandEtcdBase, svcs)
 
 	ticker := time.NewTicker(30 * time.Second)
 
 	defChange := make(chan bool)
-	mustWatchServiceDefs(etcdClient, &opts.ServiceDefinitionBase, defChange)
+	mustWatchServiceDefs(mainContext, kApi, &opts.ServiceDefinitionBase, defChange)
 
 	log.Info("beginning watch")
 	// NOTE: never deletes backends, so orphans will need to be removed manually
@@ -66,15 +79,23 @@ func main() {
 		select {
 		case <-defChange:
 			log.Info("detected change to service definitions")
-			svcs = mustGetServices(etcdClient, &opts.ServiceDefinitionBase)
+			svcs = mustGetServices(mainContext, kApi, &opts.ServiceDefinitionBase)
 			log.WithField("count", len(svcs)).Debug("found service definitions")
-			initializeVulcandBackends(etcdClient, opts.VulcandEtcdBase, svcs)
-			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
+			initializeVulcandBackends(mainContext, kApi, opts.VulcandEtcdBase, svcs)
+			updateVulcanDFromDocker(mainContext, dockerClient, kApi, &opts.VulcandEtcdBase, svcs)
 		case <-ticker.C:
 			log.Debug("tick")
-			updateVulcanDFromDocker(dockerClient, etcdClient, &opts.VulcandEtcdBase, svcs)
+			updateVulcanDFromDocker(mainContext, dockerClient, kApi, &opts.VulcandEtcdBase, svcs)
 		}
 	}
+}
+
+func mustCreateServiceDirectory(ctx context.Context, kApi etcd.KeysAPI, basepath string) {
+	myContext, myCancel := context.WithTimeout(ctx, DefaultTimeout)
+	defer myCancel()
+
+	_, err := kApi.Set(myContext, basepath, "", &etcd.SetOptions{Dir: true, PrevExist: etcd.PrevNoExist})
+	log.WithField("error", err).Warn("error creating servicedef directory")
 }
 
 func mustGetDockerClient(path string) *docker.Client {
@@ -89,7 +110,7 @@ func mustGetDockerClient(path string) *docker.Client {
 	return client
 }
 
-func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulcanPath *string, svcs services) {
+func updateVulcanDFromDocker(ctx context.Context, dclient *docker.Client, eclient etcd.KeysAPI, vulcanPath *string, svcs services) {
 	containers, err := dclient.ListContainers(docker.ListContainersOptions{})
 	if err != nil {
 		log.WithField("error", err).Fatal("unable to list running docker containers")
@@ -101,7 +122,7 @@ func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulca
 			for _, s := range svcs {
 				if s.re.MatchString(cleanName) {
 					log.WithField("container_name", cleanName).Debug("registering container as server")
-					registerContainerWithVulcan(eclient, s, &c, vulcanPath, cleanName)
+					registerContainerWithVulcan(ctx, eclient, s, &c, vulcanPath, cleanName)
 				}
 			}
 		}
@@ -109,7 +130,7 @@ func updateVulcanDFromDocker(dclient *docker.Client, eclient *etcd.Client, vulca
 
 }
 
-func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *docker.APIContainers, vulcanPath *string, instanceName string) {
+func registerContainerWithVulcan(ctx context.Context, client etcd.KeysAPI, svc *Service, container *docker.APIContainers, vulcanPath *string, instanceName string) {
 	port, err := findExternalPort(container, svc.serviceDef.ContainerPort)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -123,7 +144,7 @@ func registerContainerWithVulcan(client *etcd.Client, svc *Service, container *d
 	}
 
 	server := newServer(opts.Host, port)
-	if err = server.put(client, *vulcanPath, svc.key, instanceName); err != nil {
+	if err = server.put(ctx, client, *vulcanPath, svc.key, instanceName); err != nil {
 		log.WithFields(log.Fields{
 			"error":          err,
 			"service":        svc.key,
@@ -149,10 +170,10 @@ func findExternalPort(container *docker.APIContainers, containerPort int64) (int
 	return -1, PortNotExposedError
 }
 
-func initializeVulcandBackends(client *etcd.Client, basepath string, svcs services) {
+func initializeVulcandBackends(ctx context.Context, client etcd.KeysAPI, basepath string, svcs services) {
 	for _, s := range svcs {
 		backend := Backend{Type: "http"}
-		if err := backend.put(client, basepath, s.key); err != nil {
+		if err := backend.put(ctx, client, basepath, s.key); err != nil {
 			log.WithFields(log.Fields{
 				"error":   err,
 				"service": s.key,
@@ -162,41 +183,45 @@ func initializeVulcandBackends(client *etcd.Client, basepath string, svcs servic
 }
 
 // non-blocking
-func mustWatchServiceDefs(client *etcd.Client, basepath *string, changed chan<- bool) {
-	receiver := make(chan *etcd.Response)
-	go func() {
-		for {
-			<-receiver
-			changed <- true
-		}
-	}()
+func mustWatchServiceDefs(ctx context.Context, client etcd.KeysAPI, basepath *string, changed chan<- bool) {
+	watcher := client.Watcher(*basepath, &etcd.WatcherOptions{Recursive: true})
 
 	watchOperation := func() error {
-		_, err := client.Watch(*basepath, 0, true, receiver, nil)
-		return err
+		resp, err := watcher.Next(ctx)
+		if err != nil {
+			return err
+		}
+
+		if resp.Action != "get" {
+			changed <- true
+		}
+
+		return nil
 	}
 
-	errNotify := func(nerr error, dur time.Duration) {
+	notify := func(err error, dur time.Duration) {
 		log.WithFields(log.Fields{
-			"error":       nerr,
-			"servicepath": *basepath,
-			"duration":    dur,
-		}).Warn("etcd watch failed")
+			"dur":          dur,
+			"error":        err,
+			"service_path": *basepath,
+		}).Error("service definition watch failed. backing off.")
 	}
 
 	go func() {
-		err := backoff.RetryNotify(watchOperation, backoff.NewExponentialBackOff(), errNotify)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"error":       err,
-				"servicepath": *basepath,
-			}).Fatal("could not recover communications with etcd, watch failed")
+		for {
+			err := backoff.RetryNotify(watchOperation, backoff.NewExponentialBackOff(), notify)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"error":        err,
+					"service_path": *basepath,
+				}).Fatal("unable to recover communication with etcd, watch abandoned")
+			}
 		}
 	}()
 }
 
-func mustGetServices(client *etcd.Client, basepath *string) services {
-	resp, err := client.Get(*basepath, false, true)
+func mustGetServices(ctx context.Context, client etcd.KeysAPI, basepath *string) services {
+	resp, err := client.Get(ctx, *basepath, &etcd.GetOptions{Recursive: true})
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error":    err,

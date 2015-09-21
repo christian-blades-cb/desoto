@@ -12,9 +12,14 @@
 			"Rev": "4dc77674aceaabba2c7e3da25d4c823edfb73f99"
 		},
 		{
-			"ImportPath": "github.com/coreos/go-etcd/etcd",
-			"Comment": "v2.0.0-3-g0424b5f",
-			"Rev": "0424b5f86ef0ca57a5309c599f74bbb3e97ecd9d"
+			"ImportPath": "github.com/coreos/etcd/client",
+			"Comment": "v2.1.0-alpha.1-102-g235aef5",
+			"Rev": "235aef53650f0447eedf52020b42df1b437a7f76"
+		},
+		{
+			"ImportPath": "github.com/coreos/etcd/pkg/types",
+			"Comment": "v2.1.0-alpha.1-102-g235aef5",
+			"Rev": "235aef53650f0447eedf52020b42df1b437a7f76"
 		},
 		{
 			"ImportPath": "github.com/docker/docker/pkg/archive",
@@ -68,6 +73,10 @@
 		{
 			"ImportPath": "github.com/pquerna/ffjson/fflib/v1",
 			"Rev": "184f78649ba053f484de46921391e6d0c6f5172f"
+		},
+		{
+			"ImportPath": "golang.org/x/net/context",
+			"Rev": "7dbad50ab5b31073856416cdcfeb2796d682f844"
 		}
 	]
 }

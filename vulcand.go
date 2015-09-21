@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/coreos/go-etcd/etcd"
+	etcd "github.com/coreos/etcd/client"
+	"golang.org/x/net/context"
+	"time"
 )
 
 //go:generate ffjson $GOFILE
@@ -13,15 +15,19 @@ type Backend struct {
 }
 
 const backendPathPattern = "%s/backends/%s/backend"
+const serverTTL = 60 * time.Second
 
-func (b *Backend) put(client *etcd.Client, vulcanpath, servicename string) error {
+func (b *Backend) put(ctx context.Context, client etcd.KeysAPI, vulcanpath, servicename string) error {
+	myContext, cancel := context.WithTimeout(ctx, DefaultTimeout)
+	defer cancel()
+
 	key := fmt.Sprintf(backendPathPattern, vulcanpath, servicename)
 	be, err := json.Marshal(b)
 	if err != nil {
 		return err
 	}
 
-	_, err = client.Set(key, fmt.Sprintf("%s", be), 0)
+	_, err = client.Set(myContext, key, fmt.Sprintf("%s", be), &etcd.SetOptions{TTL: 0, PrevExist: etcd.PrevIgnore})
 	return err
 }
 
@@ -37,13 +43,16 @@ func newServer(host string, port int64) Server {
 	}
 }
 
-func (s *Server) put(client *etcd.Client, vulcanpath, servicename, instancename string) error {
+func (s *Server) put(ctx context.Context, client etcd.KeysAPI, vulcanpath, servicename, instancename string) error {
+	myContext, cancel := context.WithTimeout(ctx, DefaultTimeout)
+	defer cancel()
+
 	key := fmt.Sprintf(serverPathPattern, vulcanpath, servicename, instancename)
 	se, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
 
-	_, err = client.Set(key, fmt.Sprintf("%s", se), 60)
+	_, err = client.Set(myContext, key, fmt.Sprintf("%s", se), &etcd.SetOptions{TTL: serverTTL, PrevExist: etcd.PrevIgnore})
 	return err
 }
