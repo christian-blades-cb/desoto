@@ -184,12 +184,30 @@ func initializeVulcandBackends(ctx context.Context, client etcd.KeysAPI, basepat
 
 // non-blocking
 func mustWatchServiceDefs(ctx context.Context, client etcd.KeysAPI, basepath *string, changed chan<- bool) {
-	watcher := client.Watcher(*basepath, &etcd.WatcherOptions{Recursive: true})
+	wOpts := &etcd.WatcherOptions{Recursive: true}
+	watcher := client.Watcher(*basepath, wOpts)
 
 	watchOperation := func() error {
 		resp, err := watcher.Next(ctx)
 		if err != nil {
-			return err
+			switch v := err.(type) {
+			case etcd.Error:
+				if v.Code == etcd.ErrorCodeEventIndexCleared {
+					watcher = client.Watcher(*basepath, wOpts)
+
+					log.WithFields(log.Fields{
+						"basepath": *basepath,
+						"code":     v.Code,
+						"cause":    v.Cause,
+						"index":    v.Index,
+						"message":  v.Message,
+					}).Warn("refreshed watcher")
+
+					return nil
+				}
+			default:
+				return err
+			}
 		}
 
 		if resp.Action != "get" {
