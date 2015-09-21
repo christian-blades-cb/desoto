@@ -3,6 +3,7 @@ package main // import "github.com/christian-blades-cb/desoto"
 import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/cenkalti/backoff"
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/jessevdk/go-flags"
@@ -170,13 +171,26 @@ func mustWatchServiceDefs(client *etcd.Client, basepath *string, changed chan<- 
 		}
 	}()
 
-	go func() {
+	watchOperation := func() error {
 		_, err := client.Watch(*basepath, 0, true, receiver, nil)
+		return err
+	}
+
+	errNotify := func(nerr error, dur time.Duration) {
+		log.WithFields(log.Fields{
+			"error":       nerr,
+			"servicepath": *basepath,
+			"duration":    dur,
+		}).Warn("etcd watch failed")
+	}
+
+	go func() {
+		err := backoff.RetryNotify(watchOperation, backoff.NewExponentialBackOff(), errNotify)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"error":       err,
-				"servicepath": basepath,
-			}).Fatal("could not start watch on service definitions")
+				"servicepath": *basepath,
+			}).Fatal("could not recover communications with etcd, watch failed")
 		}
 	}()
 }
@@ -186,7 +200,7 @@ func mustGetServices(client *etcd.Client, basepath *string) services {
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error":    err,
-			"basepath": basepath,
+			"basepath": *basepath,
 		}).Fatal("unable to get service definitions from etcd")
 	}
 
@@ -196,7 +210,7 @@ func mustGetServices(client *etcd.Client, basepath *string) services {
 		if err != nil {
 			log.WithFields(log.Fields{
 				"error":    err,
-				"basepath": basepath,
+				"basepath": *basepath,
 				"key":      node.Key,
 			}).Warn("invalid service definition. skipping.")
 		} else {

@@ -8,6 +8,10 @@
 			"Rev": "55eb11d21d2a31a3cc93838241d04800f52e823d"
 		},
 		{
+			"ImportPath": "github.com/cenkalti/backoff",
+			"Rev": "4dc77674aceaabba2c7e3da25d4c823edfb73f99"
+		},
+		{
 			"ImportPath": "github.com/coreos/go-etcd/etcd",
 			"Comment": "v2.0.0-3-g0424b5f",
 			"Rev": "0424b5f86ef0ca57a5309c599f74bbb3e97ecd9d"
