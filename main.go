@@ -5,7 +5,6 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/cenkalti/backoff"
 	etcd "github.com/coreos/etcd/client"
-	//	"github.com/coreos/go-etcd/etcd"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/jessevdk/go-flags"
 	"golang.org/x/net/context"
@@ -206,7 +205,11 @@ func mustWatchServiceDefs(ctx context.Context, client etcd.KeysAPI, basepath *st
 					return nil
 				}
 			default:
-				return err
+				if err.Error() == "unexpected end of JSON input" {
+					log.WithField("error", err).Warn("probably a connection timeout. are we in etcd 0.4.x?")
+				} else {
+					return err
+				}
 			}
 		}
 
